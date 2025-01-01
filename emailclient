@@ -1,0 +1,117 @@
+const randomstring = require('randomstring');
+const { Op } = require('sequelize');
+
+const providers = require('../../../../providers');
+const CustomGraphqlError = require('../../../../shared-lib/error-handler');
+const jwt = require('../../../../utils/auth/jwt');
+const { getMessage } = require('../../../../utils/messages');
+const teammateLogger = require('../../teammate-logger');
+
+const sendInviteTeammate = async (parent, args, ctx) => {
+  const {
+    req: { useragent = {}, brandUrl }, requestMeta, models, localeService,
+  } = ctx;
+  const { os, browser } = useragent;
+  try {
+    const {
+      User: UserModel, Workspace: WorkspaceModel, Brand: BrandModel, WorkspaceTeammate: WorkspaceTeammateModel,
+    } = models;
+
+    const { data } = args;
+    const { emails, workspaceId } = data;
+
+    if (!emails.length) {
+      throw new CustomGraphqlError(getMessage('MISSING_REQUIRED_FIELDS', localeService));
+    }
+
+    const workspace = await WorkspaceModel.findByPk(workspaceId);
+    if (!workspace) {
+      throw new CustomGraphqlError(getMessage('WORKSPACE_NOT_FOUND', localeService));
+    }
+
+    const brand = await BrandModel.findOne({ where: { url: brandUrl } });
+    if (!brand) {
+      throw new Error('Brand not found');
+    }
+
+    await Promise.all(emails.map(async email => {
+      if (!email.trim()) {
+        throw new CustomGraphqlError(getMessage('MISSING_REQUIRED_FIELDS', localeService));
+      }
+
+      const userWhere = {
+        email: {
+          [Op.iLike]: `${email}`,
+        },
+      };
+
+      const user = await UserModel.findOne({ where: userWhere });
+      // Find groupId from WorkspaceTeammate model using userId and workspaceId
+      const workspaceTeammate = await WorkspaceTeammateModel.findOne({
+        where: {
+          userId: user.id,
+          workspaceId,
+        },
+      });
+
+      if (!workspaceTeammate || !workspaceTeammate.groupId) {
+        throw new CustomGraphqlError(getMessage('GROUP_NOT_FOUND', localeService));
+      }
+
+      if (!workspaceTeammate?.signatureId) {
+        throw new CustomGraphqlError(getMessage('TEAMMATE_SIGNATURE_NOT_CREATED', localeService));
+      }
+
+      const token = randomstring.generate(128);
+      await jwt.saveResetToken(user.id, token, { os, browser });
+      const invitationUrl = user?.status === 'ACTIVE'
+        ? `${brandUrl}/workspace/${workspaceId}`
+        : `${brandUrl}/auth/create-password?uid=${user.id}&token=${token}&workspaceId=${workspaceId}`;
+      const brandSupportEmail = brand?.supportEmail || '';
+      const sendMailData = {
+        Destination: {
+          ToAddresses: [user.email],
+        },
+        Message: {
+          Subject: {
+            Data: `You've been invited to ${brand?.name}`,
+          },
+          Body: {
+            Html: {
+              Data: `
+              <html>
+              <body>
+                <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+                  <p>Hello,</p>
+                  <p>You have been invited to make your email signature.</p>
+                  <p><a href="${invitationUrl}" style="color: #007bff; text-decoration: none;">CREATE ACCOUNT</a></p>
+                  <p>You can log in to your account and add information to create your email signature.</p>
+                  <p>Please reply to this email in case you have any queries.</p>
+                  <p>Thanks</p>
+                </div>
+              </body>
+              </html>
+              `,
+            },
+          },
+        },
+        ...(brandSupportEmail && { ReplyToAddresses: [brandSupportEmail] }),
+      };
+
+      // Send the email using SES
+      await providers.email.sendEmail({ emailData: sendMailData, type: 'SES' });
+      return null;
+    }));
+
+    const response = {
+      message: getMessage('INVITATION_LINK_SENT_SUCCESSFUL', localeService),
+    };
+
+    return response;
+  } catch (error) {
+    teammateLogger.error(`Error from sendInviteTeammate > ${error}`, requestMeta);
+    throw error;
+  }
+};
+
+module.exports = sendInviteTeammate;
