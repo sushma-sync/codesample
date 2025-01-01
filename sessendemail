@@ -1,0 +1,26 @@
+const { SendEmailCommand } = require('@aws-sdk/client-ses');
+
+const CONFIG = require('../../../config/config');
+const awsLogger = require('../aws-logger');
+
+const sesClient = require('../ses-client');
+
+const sesSendEmail = async (params = {}, requestMeta = {}) => {
+  try {
+    const sendEmailParams = {
+      Source: CONFIG.AWS.SES_FROM_EMAIL,
+      ...params,
+    };
+
+    const command = new SendEmailCommand(sendEmailParams);
+    const response = await sesClient.send(command);
+    awsLogger.info(`Email sent via SES > ${JSON.stringify(response)}`, requestMeta);
+
+    return response;
+  } catch (error) {
+    awsLogger.error(`Error from sesSendEmail > ${error}`, requestMeta);
+    throw error;
+  }
+};
+
+module.exports = sesSendEmail;
